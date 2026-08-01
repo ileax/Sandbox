@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sandbox - Electric Circuit Simulator</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="language-switcher">
+        <button id="lang-btn" title="Переключить язык / Switch language">🇷🇺 RU</button>
+    </div>
+    <div id="game-container">
+        <canvas id="game-canvas"></canvas>
+        <div id="controls">
+            <div class="palette-item" data-type="red" data-lang-en="Power Source" data-lang-ru="Источник">
+                <img src="Assets/psu_orig.png" alt="PSU" class="palette-icon" draggable="false">
+            </div>
+            <div class="palette-item" data-type="blue" data-lang-en="Wire" data-lang-ru="Провод">
+                <img src="Assets/wire.png" alt="Wire" class="palette-icon" draggable="false">
+            </div>
+            <div class="palette-item" data-type="green" data-lang-en="Lamp" data-lang-ru="Лампа">
+                <img src="Assets/lamp.png" alt="Lamp" class="palette-icon" draggable="false">
+            </div>
+            <div class="palette-item" data-type="switch" data-lang-en="Switch" data-lang-ru="Переключатель">
+                <img src="Assets/switch.png" alt="Switch" class="palette-icon" draggable="false">
+            </div>
+            <div class="palette-item" data-type="amplifier" data-lang-en="Amplifier" data-lang-ru="Усилитель">
+                <img src="Assets/amplifier.png" alt="Amplifier" class="palette-icon" draggable="false">
+            </div>
+            <div class="palette-item" data-type="inverter" data-lang-en="Inverter" data-lang-ru="Инвертор">
+                <img src="Assets/inverter.png" alt="Inverter" class="palette-icon" draggable="false">
+            </div>
+        </div>
+    </div>
+    <div id="info">
+        <span data-lang-en="🖱️ Left click - place/interact | Right click - erase" data-lang-ru="🖱️ Левая кнопка - разместить/взаимодействовать | Правая кнопка - стереть"></span>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
