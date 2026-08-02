@@ -4,6 +4,16 @@ class SandboxGame {
         this.cellSize = cellSize;
         this.paletteHeight = 60;
 
+        // Определяем, мобильное ли устройство
+        this.isMobile = /Android|iPhone|iPad|iPod|webOS/i.test(navigator.userAgent) || 
+                        ('ontouchstart' in window && window.innerWidth < 768);
+        
+        // На мобильных уменьшаем размер клетки, чтобы холст помещался
+        if (this.isMobile) {
+            const maxWidth = Math.min(window.innerWidth - 20, 600);
+            this.cellSize = Math.floor(maxWidth / this.gridSize);
+        }
+
         this.width = this.gridSize * this.cellSize;
         this.height = this.gridSize * this.cellSize;
 
@@ -61,6 +71,14 @@ class SandboxGame {
         this.amplifierPlacePos = null;
         this.placingInverter = false;
         this.inverterPlacePos = null;
+
+        // Для мобильных устройств
+        this.touchStartTime = 0;
+        this.touchStartPos = null;
+        this.isLongPress = false;
+        this.longPressTimer = null;
+        this.lastTouchCell = null;
+        this.touchAction = null; // 'draw' или 'erase'
 
         this.loadTextures().then(() => {
             this.texturesLoaded = true;
@@ -120,7 +138,6 @@ class SandboxGame {
                     resolve();
                 };
                 img.onerror = () => {
-                    console.warn(`Failed to load texture: ${path}`);
                     const fallbackCanvas = document.createElement('canvas');
                     fallbackCanvas.width = this.cellSize;
                     fallbackCanvas.height = this.cellSize;
@@ -223,14 +240,8 @@ class SandboxGame {
         const inputCell = this.grid[inputRow][inputCol];
         
         if (inputCell === 'red') return true;
-        
-        if (['blue', 'green'].includes(inputCell) && this.energyGrid[inputRow][inputCol] > 0) {
-            return true;
-        }
-        
-        if (inputCell === 'switch' && this.switchStates[`${inputRow},${inputCol}`] && this.energyGrid[inputRow][inputCol] > 0) {
-            return true;
-        }
+        if (['blue', 'green'].includes(inputCell) && this.energyGrid[inputRow][inputCol] > 0) return true;
+        if (inputCell === 'switch' && this.switchStates[`${inputRow},${inputCol}`] && this.energyGrid[inputRow][inputCol] > 0) return true;
         
         if (inputCell === 'amplifier' || inputCell === 'inverter') {
             const inputKey = `${inputRow},${inputCol}`;
@@ -253,78 +264,53 @@ class SandboxGame {
 
     getCellsBetween(cell1, cell2) {
         const cells = [];
-        
-        let x0 = cell1.col;
-        let y0 = cell1.row;
-        const x1 = cell2.col;
-        const y1 = cell2.row;
-        
-        const dx = Math.abs(x1 - x0);
-        const dy = Math.abs(y1 - y0);
-        const sx = x0 < x1 ? 1 : -1;
-        const sy = y0 < y1 ? 1 : -1;
+        let x0 = cell1.col, y0 = cell1.row;
+        const x1 = cell2.col, y1 = cell2.row;
+        const dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0);
+        const sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
         let err = dx - dy;
         
         while (x0 !== x1 || y0 !== y1) {
             const e2 = 2 * err;
-            
-            let nextX = x0;
-            let nextY = y0;
-            
-            if (e2 > -dy) {
-                err -= dy;
-                nextX = x0 + sx;
-            }
-            if (e2 < dx) {
-                err += dx;
-                nextY = y0 + sy;
-            }
-            
+            let nextX = x0, nextY = y0;
+            if (e2 > -dy) { err -= dy; nextX = x0 + sx; }
+            if (e2 < dx) { err += dx; nextY = y0 + sy; }
             if (nextX !== x0 && nextY !== y0) {
                 if (x0 + sx >= 0 && x0 + sx < this.gridSize && y0 >= 0 && y0 < this.gridSize) {
                     cells.push({ row: y0, col: x0 + sx });
                 }
             }
-            
-            x0 = nextX;
-            y0 = nextY;
-            
+            x0 = nextX; y0 = nextY;
             if (x0 !== x1 || y0 !== y1) {
                 if (x0 >= 0 && x0 < this.gridSize && y0 >= 0 && y0 < this.gridSize) {
                     cells.push({ row: y0, col: x0 });
                 }
             }
         }
-        
         return cells;
     }
 
     updateCursor(e) {
+        if (this.isMobile) return;
         const rect = this.canvas.getBoundingClientRect();
         const x = e.clientX - rect.left;
         const y = e.clientY - rect.top;
-        
         if (x < 0 || x >= this.width || y < 0 || y >= this.height) {
             this.canvas.style.cursor = 'default';
             this.lastHoveredCell = null;
             return;
         }
-        
         const col = Math.floor(x / this.cellSize);
         const row = Math.floor(y / this.cellSize);
-        
         if (row < 0 || row >= this.gridSize || col < 0 || col >= this.gridSize) {
             this.canvas.style.cursor = 'default';
             this.lastHoveredCell = null;
             return;
         }
-        
         const key = `${row},${col}`;
         const cellType = this.grid[row][col];
-        
         if (this.lastHoveredCell === key) return;
         this.lastHoveredCell = key;
-        
         if (cellType === 'switch' || cellType === 'amplifier' || cellType === 'inverter') {
             this.canvas.style.cursor = 'pointer';
         } else {
@@ -332,46 +318,54 @@ class SandboxGame {
         }
     }
 
-    bindEvents() {
-        document.addEventListener('contextmenu', (e) => {
-            e.preventDefault();
-        });
+    getCellFromEvent(e) {
+        const rect = this.canvas.getBoundingClientRect();
+        const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+        const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+        const x = clientX - rect.left;
+        const y = clientY - rect.top;
+        if (y < this.gridSize * this.cellSize && x >= 0 && x < this.width) {
+            const col = Math.floor(x / this.cellSize);
+            const row = Math.floor(y / this.cellSize);
+            if (row >= 0 && row < this.gridSize && col >= 0 && col < this.gridSize) {
+                return { row, col };
+            }
+        }
+        return null;
+    }
 
+    bindEvents() {
+        document.addEventListener('contextmenu', (e) => e.preventDefault());
         document.addEventListener('selectstart', (e) => {
             const controls = document.getElementById('controls');
             const gameContainer = document.getElementById('game-container');
             if ((gameContainer && gameContainer.contains(e.target)) || 
-                (controls && controls.contains(e.target)) ||
-                e.target === this.canvas) {
+                (controls && controls.contains(e.target)) || e.target === this.canvas) {
                 e.preventDefault();
             }
         });
+        document.addEventListener('dragstart', (e) => { if (e.target.tagName === 'IMG') e.preventDefault(); });
+        this.canvas.addEventListener('dblclick', (e) => e.preventDefault());
 
-        document.addEventListener('dragstart', (e) => {
-            if (e.target.tagName === 'IMG') {
-                e.preventDefault();
-            }
-        });
-
-        this.canvas.addEventListener('dblclick', (e) => {
-            e.preventDefault();
-        });
-
-        this.canvas.addEventListener('mousedown', (e) => this.handleMouseDown(e));
-        document.addEventListener('mousemove', (e) => this.handleMouseMove(e));
-        document.addEventListener('mouseup', (e) => this.handleMouseUp(e));
-        
-        this.canvas.addEventListener('mousemove', (e) => this.updateCursor(e));
-        
-        this.canvas.addEventListener('mouseleave', () => {
-            this.canvas.style.cursor = 'default';
-            this.lastHoveredCell = null;
-        });
+        if (this.isMobile) {
+            this.canvas.addEventListener('touchstart', (e) => this.handleTouchStart(e), { passive: false });
+            this.canvas.addEventListener('touchmove', (e) => this.handleTouchMove(e), { passive: false });
+            this.canvas.addEventListener('touchend', (e) => this.handleTouchEnd(e));
+            this.canvas.addEventListener('touchcancel', (e) => this.handleTouchEnd(e));
+        } else {
+            this.canvas.addEventListener('mousedown', (e) => this.handleMouseDown(e));
+            document.addEventListener('mousemove', (e) => this.handleMouseMove(e));
+            document.addEventListener('mouseup', (e) => this.handleMouseUp(e));
+            this.canvas.addEventListener('mousemove', (e) => this.updateCursor(e));
+            this.canvas.addEventListener('mouseleave', () => {
+                this.canvas.style.cursor = 'default';
+                this.lastHoveredCell = null;
+            });
+        }
 
         document.querySelectorAll('.palette-item').forEach(item => {
             item.addEventListener('click', (e) => {
                 e.preventDefault();
-                
                 if (item.classList.contains('selected')) {
                     item.classList.remove('selected');
                     this.selectedColor = null;
@@ -381,74 +375,170 @@ class SandboxGame {
                     this.selectedColor = item.dataset.type;
                 }
             });
-            
-            item.addEventListener('contextmenu', (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-            });
-            
+            item.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); });
             item.addEventListener('mousedown', (e) => {
-                if (e.button === 2) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                }
+                if (e.button === 2) { e.preventDefault(); e.stopPropagation(); }
             });
         });
     }
 
+    // Мобильные обработчики
+    handleTouchStart(e) {
+        e.preventDefault();
+        const cell = this.getCellFromEvent(e);
+        if (!cell) return;
+
+        this.touchStartTime = Date.now();
+        this.touchStartPos = { row: cell.row, col: cell.col };
+        this.isLongPress = false;
+        this.lastTouchCell = null;
+        this.touchAction = null;
+
+        // Запускаем таймер на 500 мс для длинного нажатия
+        clearTimeout(this.longPressTimer);
+        this.longPressTimer = setTimeout(() => {
+            this.isLongPress = true;
+            this.lastTouchCell = { row: cell.row, col: cell.col };
+            
+            const cellType = this.grid[cell.row][cell.col];
+            // Определяем действие: если клетка пустая или провод - рисуем, иначе стираем
+            if (!cellType || cellType === 'blue') {
+                this.touchAction = 'draw';
+            } else {
+                this.touchAction = 'erase';
+            }
+            
+            // Выполняем первое действие
+            if (this.touchAction === 'erase') {
+                this.handleRightClick(cell.row, cell.col);
+            } else if (this.touchAction === 'draw' && this.selectedColor === 'blue') {
+                const key = `${cell.row},${cell.col}`;
+                if (!(key in this.burnedLamps)) {
+                    this.grid[cell.row][cell.col] = 'blue';
+                }
+            }
+        }, 500);
+    }
+
+    handleTouchMove(e) {
+        e.preventDefault();
+        if (!this.isLongPress) {
+            // Если палец сдвинулся до истечения 500 мс - отменяем длинное нажатие
+            const cell = this.getCellFromEvent(e);
+            if (cell && this.touchStartPos && 
+                (Math.abs(cell.row - this.touchStartPos.row) > 1 || 
+                 Math.abs(cell.col - this.touchStartPos.col) > 1)) {
+                clearTimeout(this.longPressTimer);
+            }
+            return;
+        }
+
+        const cell = this.getCellFromEvent(e);
+        if (!cell) return;
+
+        const currentCell = { row: cell.row, col: cell.col };
+
+        if (this.lastTouchCell && 
+            (this.lastTouchCell.row !== currentCell.row || this.lastTouchCell.col !== currentCell.col)) {
+            
+            const cellsBetween = this.getCellsBetween(this.lastTouchCell, currentCell);
+            for (const betweenCell of cellsBetween) {
+                this.performTouchAction(betweenCell.row, betweenCell.col);
+            }
+        }
+
+        this.performTouchAction(cell.row, cell.col);
+        this.lastTouchCell = currentCell;
+    }
+
+    performTouchAction(row, col) {
+        if (this.touchAction === 'erase') {
+            this.handleRightClick(row, col);
+        } else if (this.touchAction === 'draw' && this.selectedColor === 'blue') {
+            const key = `${row},${col}`;
+            if (!(key in this.burnedLamps)) {
+                const cellType = this.grid[row][col];
+                if (!cellType || cellType === 'blue') {
+                    this.grid[row][col] = 'blue';
+                }
+            }
+        }
+    }
+
+    handleTouchEnd(e) {
+        clearTimeout(this.longPressTimer);
+        
+        // Если не было длинного нажатия - это короткий тап
+        if (!this.isLongPress && this.touchStartPos) {
+            const cell = this.touchStartPos;
+            const cellType = this.grid[cell.row][cell.col];
+            
+            if (cellType === 'switch' || cellType === 'amplifier' || cellType === 'inverter') {
+                this.handleLeftClick(cell.row, cell.col);
+            } else if (this.selectedColor) {
+                const key = `${cell.row},${cell.col}`;
+                if (!(key in this.burnedLamps)) {
+                    if (this.selectedColor === 'amplifier') {
+                        this.grid[cell.row][cell.col] = 'amplifier';
+                        const direction = this.autoDetermineDirection(cell.row, cell.col, 'amplifier');
+                        this.amplifierStates[key] = direction;
+                    } else if (this.selectedColor === 'inverter') {
+                        this.grid[cell.row][cell.col] = 'inverter';
+                        const direction = this.autoDetermineDirection(cell.row, cell.col, 'inverter');
+                        this.inverterStates[key] = direction;
+                    } else {
+                        this.grid[cell.row][cell.col] = this.selectedColor;
+                    }
+                }
+            }
+        }
+
+        this.isLongPress = false;
+        this.touchStartPos = null;
+        this.lastTouchCell = null;
+        this.touchAction = null;
+    }
+
+    // Десктопные обработчики
     handleMouseDown(e) {
-        const rect = this.canvas.getBoundingClientRect();
-        const x = e.clientX - rect.left;
-        const y = e.clientY - rect.top;
-
-        if (x < 0 || x >= this.width || y < 0 || y >= this.height) return;
-
-        const col = Math.floor(x / this.cellSize);
-        const row = Math.floor(y / this.cellSize);
-
-        if (row < 0 || row >= this.gridSize || col < 0 || col >= this.gridSize) return;
-
+        const cell = this.getCellFromEvent(e);
+        if (!cell) return;
         this.lastMouseCell = null;
 
         if (e.button === 0) {
             this.isLeftMouseDown = true;
-            
-            const cellType = this.grid[row][col];
+            const cellType = this.grid[cell.row][cell.col];
             if (cellType === 'switch' || cellType === 'amplifier' || cellType === 'inverter') {
-                this.handleLeftClick(row, col);
-                this.lastMouseCell = { row, col };
+                this.handleLeftClick(cell.row, cell.col);
+                this.lastMouseCell = { row: cell.row, col: cell.col };
                 return;
             }
-            
             if (this.selectedColor === 'amplifier') {
-                const key = `${row},${col}`;
+                const key = `${cell.row},${cell.col}`;
                 if (!(key in this.burnedLamps)) {
-                    this.grid[row][col] = 'amplifier';
+                    this.grid[cell.row][cell.col] = 'amplifier';
                     this.placingAmplifier = true;
-                    this.amplifierPlacePos = { row, col };
-                    const direction = this.autoDetermineDirection(row, col, 'amplifier');
-                    this.amplifierStates[key] = direction;
+                    this.amplifierPlacePos = { row: cell.row, col: cell.col };
+                    this.amplifierStates[key] = this.autoDetermineDirection(cell.row, cell.col, 'amplifier');
                     this.canvas.style.cursor = 'pointer';
                 }
             } else if (this.selectedColor === 'inverter') {
-                const key = `${row},${col}`;
+                const key = `${cell.row},${cell.col}`;
                 if (!(key in this.burnedLamps)) {
-                    this.grid[row][col] = 'inverter';
+                    this.grid[cell.row][cell.col] = 'inverter';
                     this.placingInverter = true;
-                    this.inverterPlacePos = { row, col };
-                    const direction = this.autoDetermineDirection(row, col, 'inverter');
-                    this.inverterStates[key] = direction;
+                    this.inverterPlacePos = { row: cell.row, col: cell.col };
+                    this.inverterStates[key] = this.autoDetermineDirection(cell.row, cell.col, 'inverter');
                     this.canvas.style.cursor = 'pointer';
                 }
             } else {
-                this.handleLeftClick(row, col);
+                this.handleLeftClick(cell.row, cell.col);
             }
-            
-            this.lastMouseCell = { row, col };
+            this.lastMouseCell = { row: cell.row, col: cell.col };
         } else if (e.button === 2) {
             this.isRightMouseDown = true;
-            this.handleRightClick(row, col);
-            this.lastMouseCell = { row, col };
+            this.handleRightClick(cell.row, cell.col);
+            this.lastMouseCell = { row: cell.row, col: cell.col };
         }
     }
 
@@ -460,289 +550,132 @@ class SandboxGame {
             this.placingInverter = false;
             this.inverterPlacePos = null;
         }
-        if (e.button === 2) {
-            this.isRightMouseDown = false;
-        }
-        
-        if (!this.isLeftMouseDown && !this.isRightMouseDown) {
-            this.lastMouseCell = null;
-        }
+        if (e.button === 2) this.isRightMouseDown = false;
+        if (!this.isLeftMouseDown && !this.isRightMouseDown) this.lastMouseCell = null;
     }
 
     handleMouseMove(e) {
         this.updateCursor(e);
-        
         if (this.placingAmplifier && this.amplifierPlacePos && !this.isRightMouseDown) {
             this.handleDirectionSelection(this.amplifierPlacePos, 'amplifier', e);
             return;
         }
-        
         if (this.placingInverter && this.inverterPlacePos && !this.isRightMouseDown) {
             this.handleDirectionSelection(this.inverterPlacePos, 'inverter', e);
             return;
         }
-        
         if (!this.isRightMouseDown && !this.isLeftMouseDown) return;
         
-        const rect = this.canvas.getBoundingClientRect();
-        const x = e.clientX - rect.left;
-        const y = e.clientY - rect.top;
-        
-        if (x < 0 || x >= this.width || y < 0 || y >= this.height) {
-            return;
-        }
-        
-        const col = Math.floor(x / this.cellSize);
-        const row = Math.floor(y / this.cellSize);
-        
-        if (row < 0 || row >= this.gridSize || col < 0 || col >= this.gridSize) return;
-        
-        const currentCell = { row, col };
+        const cell = this.getCellFromEvent(e);
+        if (!cell) return;
+        const currentCell = { row: cell.row, col: cell.col };
 
         if (this.lastMouseCell && 
             (this.lastMouseCell.row !== currentCell.row || this.lastMouseCell.col !== currentCell.col)) {
-            
             const cellsBetween = this.getCellsBetween(this.lastMouseCell, currentCell);
-            
             for (const betweenCell of cellsBetween) {
-                if (this.isRightMouseDown) {
-                    this.handleRightClick(betweenCell.row, betweenCell.col);
-                }
+                if (this.isRightMouseDown) this.handleRightClick(betweenCell.row, betweenCell.col);
                 if (this.isLeftMouseDown && this.selectedColor === 'blue') {
                     const key = `${betweenCell.row},${betweenCell.col}`;
                     if (!(key in this.burnedLamps)) {
-                        const cellType = this.grid[betweenCell.row][betweenCell.col];
-                        if (!cellType || cellType === 'blue') {
-                            this.grid[betweenCell.row][betweenCell.col] = 'blue';
-                        }
+                        const ct = this.grid[betweenCell.row][betweenCell.col];
+                        if (!ct || ct === 'blue') this.grid[betweenCell.row][betweenCell.col] = 'blue';
                     }
                 }
             }
         }
-
-        if (this.isRightMouseDown) {
-            this.handleRightClick(row, col);
-        }
+        if (this.isRightMouseDown) this.handleRightClick(cell.row, cell.col);
         if (this.isLeftMouseDown && this.selectedColor === 'blue') {
-            const key = `${row},${col}`;
+            const key = `${cell.row},${cell.col}`;
             if (!(key in this.burnedLamps)) {
-                const cellType = this.grid[row][col];
-                if (!cellType || cellType === 'blue') {
-                    this.grid[row][col] = 'blue';
-                }
+                const ct = this.grid[cell.row][cell.col];
+                if (!ct || ct === 'blue') this.grid[cell.row][cell.col] = 'blue';
             }
         }
-
         this.lastMouseCell = currentCell;
     }
-    
+
     handleDirectionSelection(placePos, type, e) {
-        const rect = this.canvas.getBoundingClientRect();
-        const x = e.clientX - rect.left;
-        const y = e.clientY - rect.top;
-        
-        if (x >= 0 && x < this.width && y >= 0 && y < this.height) {
-            const col = Math.floor(x / this.cellSize);
-            const row = Math.floor(y / this.cellSize);
-            
-            if (row >= 0 && row < this.gridSize && col >= 0 && col < this.gridSize) {
-                const key = `${placePos.row},${placePos.col}`;
-                let newDir = null;
-                
-                if (row < placePos.row && col === placePos.col) {
-                    newDir = 3;
-                } else if (row > placePos.row && col === placePos.col) {
-                    newDir = 1;
-                } else if (col < placePos.col && row === placePos.row) {
-                    newDir = 2;
-                } else if (col > placePos.col && row === placePos.row) {
-                    newDir = 0;
-                }
-                
-                if (newDir !== null) {
-                    if (type === 'amplifier') {
-                        this.amplifierStates[key] = newDir;
-                    } else if (type === 'inverter') {
-                        this.inverterStates[key] = newDir;
-                    }
-                }
-            }
+        const cell = this.getCellFromEvent(e);
+        if (!cell) return;
+        const key = `${placePos.row},${placePos.col}`;
+        let newDir = null;
+        if (cell.row < placePos.row && cell.col === placePos.col) newDir = 3;
+        else if (cell.row > placePos.row && cell.col === placePos.col) newDir = 1;
+        else if (cell.col < placePos.col && cell.row === placePos.row) newDir = 2;
+        else if (cell.col > placePos.col && cell.row === placePos.row) newDir = 0;
+        if (newDir !== null) {
+            if (type === 'amplifier') this.amplifierStates[key] = newDir;
+            else if (type === 'inverter') this.inverterStates[key] = newDir;
         }
     }
 
     handleLeftClick(row, col) {
         const key = `${row},${col}`;
         if (key in this.burnedLamps) return;
-
         const cellType = this.grid[row][col];
-
-        if (cellType === 'switch') {
-            this.switchStates[key] = !this.switchStates[key];
-            return;
-        }
-        
-        if (cellType === 'amplifier') {
-            const currentDir = this.amplifierStates[key] || 0;
-            this.amplifierStates[key] = (currentDir - 1 + 4) % 4;
-            return;
-        }
-        
-        if (cellType === 'inverter') {
-            const currentDir = this.inverterStates[key] || 0;
-            this.inverterStates[key] = (currentDir - 1 + 4) % 4;
-            return;
-        }
-
+        if (cellType === 'switch') { this.switchStates[key] = !this.switchStates[key]; return; }
+        if (cellType === 'amplifier') { this.amplifierStates[key] = ((this.amplifierStates[key] || 0) - 1 + 4) % 4; return; }
+        if (cellType === 'inverter') { this.inverterStates[key] = ((this.inverterStates[key] || 0) - 1 + 4) % 4; return; }
         if (this.selectedColor) {
             this.grid[row][col] = this.selectedColor;
-
-            if (this.selectedColor === 'amplifier') {
-                const direction = this.autoDetermineDirection(row, col, 'amplifier');
-                this.amplifierStates[key] = direction;
-            } else if (this.selectedColor === 'inverter') {
-                const direction = this.autoDetermineDirection(row, col, 'inverter');
-                this.inverterStates[key] = direction;
-            }
-            
-            if (this.selectedColor === 'switch' || this.selectedColor === 'amplifier' || this.selectedColor === 'inverter') {
-                this.canvas.style.cursor = 'pointer';
-            }
+            if (this.selectedColor === 'amplifier') this.amplifierStates[key] = this.autoDetermineDirection(row, col, 'amplifier');
+            else if (this.selectedColor === 'inverter') this.inverterStates[key] = this.autoDetermineDirection(row, col, 'inverter');
         }
     }
 
     handleRightClick(row, col) {
         const key = `${row},${col}`;
         if (this.burnedLamps[key]) return;
-
         const cellType = this.grid[row][col];
         this.grid[row][col] = null;
-        
-        if (cellType === 'switch') {
-            delete this.switchStates[key];
-        } else if (cellType === 'amplifier') {
-            delete this.amplifierStates[key];
-        } else if (cellType === 'inverter') {
-            delete this.inverterStates[key];
-        }
+        if (cellType === 'switch') delete this.switchStates[key];
+        else if (cellType === 'amplifier') delete this.amplifierStates[key];
+        else if (cellType === 'inverter') delete this.inverterStates[key];
     }
 
     autoDetermineDirection(row, col, type) {
         let leftEnergy = 0, rightEnergy = 0, topEnergy = 0, bottomEnergy = 0;
-
-        if (col > 0 && ['blue', 'red', 'green', 'switch'].includes(this.grid[row][col - 1])) {
-            leftEnergy = this.energyGrid[row][col - 1];
-        }
-        if (col < this.gridSize - 1 && ['blue', 'red', 'green', 'switch'].includes(this.grid[row][col + 1])) {
-            rightEnergy = this.energyGrid[row][col + 1];
-        }
-        if (row > 0 && ['blue', 'red', 'green', 'switch'].includes(this.grid[row - 1][col])) {
-            topEnergy = this.energyGrid[row - 1][col];
-        }
-        if (row < this.gridSize - 1 && ['blue', 'red', 'green', 'switch'].includes(this.grid[row + 1][col])) {
-            bottomEnergy = this.energyGrid[row + 1][col];
-        }
+        if (col > 0 && ['blue', 'red', 'green', 'switch'].includes(this.grid[row][col - 1])) leftEnergy = this.energyGrid[row][col - 1];
+        if (col < this.gridSize - 1 && ['blue', 'red', 'green', 'switch'].includes(this.grid[row][col + 1])) rightEnergy = this.energyGrid[row][col + 1];
+        if (row > 0 && ['blue', 'red', 'green', 'switch'].includes(this.grid[row - 1][col])) topEnergy = this.energyGrid[row - 1][col];
+        if (row < this.gridSize - 1 && ['blue', 'red', 'green', 'switch'].includes(this.grid[row + 1][col])) bottomEnergy = this.energyGrid[row + 1][col];
 
         const horizontalPower = Math.max(leftEnergy, rightEnergy);
         const verticalPower = Math.max(topEnergy, bottomEnergy);
-
         if (horizontalPower > 0 || verticalPower > 0) {
-            if (horizontalPower > verticalPower) {
-                return leftEnergy >= rightEnergy ? 0 : 2;
-            } else {
-                return topEnergy >= bottomEnergy ? 1 : 3;
-            }
+            if (horizontalPower > verticalPower) return leftEnergy >= rightEnergy ? 0 : 2;
+            else return topEnergy >= bottomEnergy ? 1 : 3;
         }
 
         let activeDevices = [];
+        const checkDevice = (r, c, expectedDir) => {
+            const k = `${r},${c}`;
+            const ct = this.grid[r][c];
+            let d;
+            if (ct === 'amplifier') d = this.amplifierStates[k] || 0;
+            else if (ct === 'inverter') d = this.inverterStates[k] || 0;
+            else return;
+            if (d === expectedDir && (this.energyGrid[r][c] > 0 || this.isAmplifierPowered(r, c))) activeDevices.push(d);
+        };
 
-        if (row > 0 && (this.grid[row - 1][col] === 'amplifier' || this.grid[row - 1][col] === 'inverter')) {
-            const key = `${row - 1},${col}`;
-            const cellType = this.grid[row - 1][col];
-            let dir;
-            if (cellType === 'amplifier') {
-                dir = this.amplifierStates[key] || 0;
-            } else {
-                dir = this.inverterStates[key] || 0;
-            }
-            if (dir === 1) {
-                if (this.energyGrid[row - 1][col] > 0 || this.isAmplifierPowered(row - 1, col)) {
-                    activeDevices.push(dir);
-                }
-            }
-        }
+        if (row > 0 && (this.grid[row - 1][col] === 'amplifier' || this.grid[row - 1][col] === 'inverter')) checkDevice(row - 1, col, 1);
+        if (col < this.gridSize - 1 && (this.grid[row][col + 1] === 'amplifier' || this.grid[row][col + 1] === 'inverter')) checkDevice(row, col + 1, 2);
+        if (row < this.gridSize - 1 && (this.grid[row + 1][col] === 'amplifier' || this.grid[row + 1][col] === 'inverter')) checkDevice(row + 1, col, 3);
+        if (col > 0 && (this.grid[row][col - 1] === 'amplifier' || this.grid[row][col - 1] === 'inverter')) checkDevice(row, col - 1, 0);
 
-        if (col < this.gridSize - 1 && (this.grid[row][col + 1] === 'amplifier' || this.grid[row][col + 1] === 'inverter')) {
-            const key = `${row},${col + 1}`;
-            const cellType = this.grid[row][col + 1];
-            let dir;
-            if (cellType === 'amplifier') {
-                dir = this.amplifierStates[key] || 0;
-            } else {
-                dir = this.inverterStates[key] || 0;
-            }
-            if (dir === 2) {
-                if (this.energyGrid[row][col + 1] > 0 || this.isAmplifierPowered(row, col + 1)) {
-                    activeDevices.push(dir);
-                }
-            }
-        }
-
-        if (row < this.gridSize - 1 && (this.grid[row + 1][col] === 'amplifier' || this.grid[row + 1][col] === 'inverter')) {
-            const key = `${row + 1},${col}`;
-            const cellType = this.grid[row + 1][col];
-            let dir;
-            if (cellType === 'amplifier') {
-                dir = this.amplifierStates[key] || 0;
-            } else {
-                dir = this.inverterStates[key] || 0;
-            }
-            if (dir === 3) {
-                if (this.energyGrid[row + 1][col] > 0 || this.isAmplifierPowered(row + 1, col)) {
-                    activeDevices.push(dir);
-                }
-            }
-        }
-
-        if (col > 0 && (this.grid[row][col - 1] === 'amplifier' || this.grid[row][col - 1] === 'inverter')) {
-            const key = `${row},${col - 1}`;
-            const cellType = this.grid[row][col - 1];
-            let dir;
-            if (cellType === 'amplifier') {
-                dir = this.amplifierStates[key] || 0;
-            } else {
-                dir = this.inverterStates[key] || 0;
-            }
-            if (dir === 0) {
-                if (this.energyGrid[row][col - 1] > 0 || this.isAmplifierPowered(row, col - 1)) {
-                    activeDevices.push(dir);
-                }
-            }
-        }
-
-        if (activeDevices.length === 1) {
-            return activeDevices[0];
-        }
-
+        if (activeDevices.length === 1) return activeDevices[0];
         return 0;
     }
 
     updatePower() {
         const newEnergyGrid = Array(this.gridSize).fill().map(() => Array(this.gridSize).fill(0));
-
-        let changed = true;
-        let iterations = 0;
+        let changed = true, iterations = 0;
         const maxIterations = 100;
-
-        for (let r = 0; r < this.gridSize; r++) {
-            for (let c = 0; c < this.gridSize; c++) {
-                this.energyGrid[r][c] = 0;
-            }
-        }
+        for (let r = 0; r < this.gridSize; r++) for (let c = 0; c < this.gridSize; c++) this.energyGrid[r][c] = 0;
 
         while (changed && iterations < maxIterations) {
-            changed = false;
-            iterations++;
-            
+            changed = false; iterations++;
             const passGrid = Array(this.gridSize).fill().map(() => Array(this.gridSize).fill(0));
 
             for (let row = 0; row < this.gridSize; row++) {
@@ -750,13 +683,7 @@ class SandboxGame {
                     if (this.grid[row][col] === 'red') {
                         const sourceGrid = Array(this.gridSize).fill().map(() => Array(this.gridSize).fill(0));
                         this.propagateEnergyFromSource(row, col, sourceGrid);
-                        for (let r = 0; r < this.gridSize; r++) {
-                            for (let c = 0; c < this.gridSize; c++) {
-                                if (sourceGrid[r][c] > passGrid[r][c]) {
-                                    passGrid[r][c] = sourceGrid[r][c];
-                                }
-                            }
-                        }
+                        for (let r = 0; r < this.gridSize; r++) for (let c = 0; c < this.gridSize; c++) if (sourceGrid[r][c] > passGrid[r][c]) passGrid[r][c] = sourceGrid[r][c];
                     }
                 }
             }
@@ -772,13 +699,7 @@ class SandboxGame {
                                 const deviceGrid = Array(this.gridSize).fill().map(() => Array(this.gridSize).fill(0));
                                 deviceGrid[outRow][outCol] = 20;
                                 this.propagateEnergyFromSourceWithDistance(outRow, outCol, deviceGrid, 1);
-                                for (let r = 0; r < this.gridSize; r++) {
-                                    for (let c = 0; c < this.gridSize; c++) {
-                                        if (deviceGrid[r][c] > passGrid[r][c]) {
-                                            passGrid[r][c] = deviceGrid[r][c];
-                                        }
-                                    }
-                                }
+                                for (let r = 0; r < this.gridSize; r++) for (let c = 0; c < this.gridSize; c++) if (deviceGrid[r][c] > passGrid[r][c]) passGrid[r][c] = deviceGrid[r][c];
                             }
                         }
                     }
@@ -787,9 +708,7 @@ class SandboxGame {
 
             for (const [key, direction] of Object.entries(this.inverterStates)) {
                 const [row, col] = key.split(',').map(Number);
-                const hasInput = this.shouldDeviceActivate(row, col, direction, this.energyGrid, 'inverter');
-                
-                if (!hasInput) {
+                if (!this.shouldDeviceActivate(row, col, direction, this.energyGrid, 'inverter')) {
                     const [outRow, outCol] = this.getOutputPosition(row, col, direction);
                     if (outRow >= 0 && outRow < this.gridSize && outCol >= 0 && outCol < this.gridSize) {
                         const outCellType = this.grid[outRow][outCol];
@@ -798,13 +717,7 @@ class SandboxGame {
                                 const inverterGrid = Array(this.gridSize).fill().map(() => Array(this.gridSize).fill(0));
                                 inverterGrid[outRow][outCol] = 20;
                                 this.propagateEnergyFromSourceWithDistance(outRow, outCol, inverterGrid, 1);
-                                for (let r = 0; r < this.gridSize; r++) {
-                                    for (let c = 0; c < this.gridSize; c++) {
-                                        if (inverterGrid[r][c] > passGrid[r][c]) {
-                                            passGrid[r][c] = inverterGrid[r][c];
-                                        }
-                                    }
-                                }
+                                for (let r = 0; r < this.gridSize; r++) for (let c = 0; c < this.gridSize; c++) if (inverterGrid[r][c] > passGrid[r][c]) passGrid[r][c] = inverterGrid[r][c];
                             }
                         }
                     }
@@ -813,9 +726,7 @@ class SandboxGame {
 
             for (let r = 0; r < this.gridSize; r++) {
                 for (let c = 0; c < this.gridSize; c++) {
-                    if (passGrid[r][c] !== this.energyGrid[r][c]) {
-                        changed = true;
-                    }
+                    if (passGrid[r][c] !== this.energyGrid[r][c]) changed = true;
                     newEnergyGrid[r][c] = passGrid[r][c];
                     this.energyGrid[r][c] = passGrid[r][c];
                 }
@@ -823,7 +734,6 @@ class SandboxGame {
         }
 
         this.energyGrid = newEnergyGrid;
-
         const currentTime = Date.now();
         for (let row = 0; row < this.gridSize; row++) {
             for (let col = 0; col < this.gridSize; col++) {
@@ -836,225 +746,104 @@ class SandboxGame {
     }
 
     shouldDeviceActivate(row, col, direction, tempEnergyGrid, type) {
-        const inputPos = this.getInputPosition(row, col, direction);
-        const [inputRow, inputCol] = inputPos;
-
-        if (!(inputRow >= 0 && inputRow < this.gridSize && inputCol >= 0 && inputCol < this.gridSize)) {
-            return false;
-        }
-
+        const [inputRow, inputCol] = this.getInputPosition(row, col, direction);
+        if (!(inputRow >= 0 && inputRow < this.gridSize && inputCol >= 0 && inputCol < this.gridSize)) return false;
         const inputCellType = this.grid[inputRow][inputCol];
-
         if (inputCellType === 'red') return true;
         if (['blue', 'green'].includes(inputCellType)) return tempEnergyGrid[inputRow][inputCol] > 0;
-        if (inputCellType === 'switch') {
-            return this.switchStates[`${inputRow},${inputCol}`] && tempEnergyGrid[inputRow][inputCol] > 0;
-        }
+        if (inputCellType === 'switch') return this.switchStates[`${inputRow},${inputCol}`] && tempEnergyGrid[inputRow][inputCol] > 0;
         if (inputCellType === 'amplifier') {
             const inputDir = this.amplifierStates[`${inputRow},${inputCol}`] || 0;
-            if (inputDir === direction) {
-                return this.shouldDeviceActivate(inputRow, inputCol, inputDir, tempEnergyGrid, 'amplifier');
-            }
+            if (inputDir === direction) return this.shouldDeviceActivate(inputRow, inputCol, inputDir, tempEnergyGrid, 'amplifier');
         }
         if (inputCellType === 'inverter') {
             const inputDir = this.inverterStates[`${inputRow},${inputCol}`] || 0;
-            if (inputDir === direction) {
-                return this.shouldDeviceActivate(inputRow, inputCol, inputDir, tempEnergyGrid, 'inverter');
-            }
+            if (inputDir === direction) return this.shouldDeviceActivate(inputRow, inputCol, inputDir, tempEnergyGrid, 'inverter');
         }
-
         return false;
     }
 
     getInputPosition(row, col, direction) {
-        const positions = [
-            [row, col - 1],
-            [row - 1, col],
-            [row, col + 1],
-            [row + 1, col]
-        ];
-        return positions[direction];
+        return [[row, col - 1], [row - 1, col], [row, col + 1], [row + 1, col]][direction];
     }
 
     getOutputPosition(row, col, direction) {
-        const positions = [
-            [row, col + 1],
-            [row + 1, col],
-            [row, col - 1],
-            [row - 1, col]
-        ];
-        return positions[direction];
+        return [[row, col + 1], [row + 1, col], [row, col - 1], [row - 1, col]][direction];
     }
 
     propagateEnergyFromSource(startRow, startCol, energyGrid) {
-        const queue = [[startRow, startCol, 0]];
-        const visited = new Set();
-        visited.add(`${startRow},${startCol}`);
-
+        const queue = [[startRow, startCol, 0]], visited = new Set([`${startRow},${startCol}`]);
         while (queue.length > 0) {
             const [row, col, distance] = queue.shift();
             const currentEnergy = this.getEnergyByDistance(distance);
-
-            if (currentEnergy > energyGrid[row][col]) {
-                energyGrid[row][col] = currentEnergy;
-            }
-
+            if (currentEnergy > energyGrid[row][col]) energyGrid[row][col] = currentEnergy;
             if (currentEnergy <= 0) continue;
-
-            const directions = [[0, 1], [1, 0], [0, -1], [-1, 0]];
-            for (const [dr, dc] of directions) {
-                const newRow = row + dr;
-                const newCol = col + dc;
-                const key = `${newRow},${newCol}`;
-
-                if (newRow >= 0 && newRow < this.gridSize && newCol >= 0 && newCol < this.gridSize && !visited.has(key)) {
-                    const cellType = this.grid[newRow][newCol];
-
-                    if (cellType === 'blue') {
-                        visited.add(key);
-                        queue.push([newRow, newCol, distance + 1]);
-                    } else if (cellType === 'green') {
-                        if (currentEnergy > energyGrid[newRow][newCol]) {
-                            energyGrid[newRow][newCol] = currentEnergy;
-                        }
-                        visited.add(key);
-                    } else if (cellType === 'switch') {
-                        if (this.switchStates[key]) {
-                            visited.add(key);
-                            queue.push([newRow, newCol, distance + 1]);
-                        }
-                    }
+            for (const [dr, dc] of [[0, 1], [1, 0], [0, -1], [-1, 0]]) {
+                const nr = row + dr, nc = col + dc, key = `${nr},${nc}`;
+                if (nr >= 0 && nr < this.gridSize && nc >= 0 && nc < this.gridSize && !visited.has(key)) {
+                    const ct = this.grid[nr][nc];
+                    if (ct === 'blue') { visited.add(key); queue.push([nr, nc, distance + 1]); }
+                    else if (ct === 'green') { if (currentEnergy > energyGrid[nr][nc]) energyGrid[nr][nc] = currentEnergy; visited.add(key); }
+                    else if (ct === 'switch' && this.switchStates[key]) { visited.add(key); queue.push([nr, nc, distance + 1]); }
                 }
             }
         }
     }
 
     propagateEnergyFromSourceWithDistance(startRow, startCol, energyGrid, startDistance) {
-        const queue = [[startRow, startCol, startDistance]];
-        const visited = new Set();
-        visited.add(`${startRow},${startCol}`);
-
+        const queue = [[startRow, startCol, startDistance]], visited = new Set([`${startRow},${startCol}`]);
         while (queue.length > 0) {
             const [row, col, distance] = queue.shift();
             const currentEnergy = this.getEnergyByDistance(distance);
-
-            if (currentEnergy > energyGrid[row][col]) {
-                energyGrid[row][col] = currentEnergy;
-            }
-
+            if (currentEnergy > energyGrid[row][col]) energyGrid[row][col] = currentEnergy;
             if (currentEnergy <= 0) continue;
-
-            const directions = [[0, 1], [1, 0], [0, -1], [-1, 0]];
-            for (const [dr, dc] of directions) {
-                const newRow = row + dr;
-                const newCol = col + dc;
-                const key = `${newRow},${newCol}`;
-
-                if (newRow >= 0 && newRow < this.gridSize && newCol >= 0 && newCol < this.gridSize && !visited.has(key)) {
-                    const cellType = this.grid[newRow][newCol];
-
-                    if (cellType === 'blue') {
-                        visited.add(key);
-                        queue.push([newRow, newCol, distance + 1]);
-                    } else if (cellType === 'green') {
-                        if (currentEnergy > energyGrid[newRow][newCol]) {
-                            energyGrid[newRow][newCol] = currentEnergy;
-                        }
-                        visited.add(key);
-                    } else if (cellType === 'switch') {
-                        if (this.switchStates[key]) {
-                            visited.add(key);
-                            queue.push([newRow, newCol, distance + 1]);
-                        }
-                    }
+            for (const [dr, dc] of [[0, 1], [1, 0], [0, -1], [-1, 0]]) {
+                const nr = row + dr, nc = col + dc, key = `${nr},${nc}`;
+                if (nr >= 0 && nr < this.gridSize && nc >= 0 && nc < this.gridSize && !visited.has(key)) {
+                    const ct = this.grid[nr][nc];
+                    if (ct === 'blue') { visited.add(key); queue.push([nr, nc, distance + 1]); }
+                    else if (ct === 'green') { if (currentEnergy > energyGrid[nr][nc]) energyGrid[nr][nc] = currentEnergy; visited.add(key); }
+                    else if (ct === 'switch' && this.switchStates[key]) { visited.add(key); queue.push([nr, nc, distance + 1]); }
                 }
             }
         }
     }
 
     getEnergyByDistance(distance) {
-        if (distance === 0) return 20;
-        if (distance === 1) return 20;
-        if (distance === 2) return 20;
-        if (distance === 3) return 15;
-        if (distance === 4) return 15;
-        if (distance === 5) return 10;
-        if (distance === 6) return 10;
-        if (distance === 7) return 5;
-        if (distance === 8) return 5;
+        if (distance <= 2) return 20;
+        if (distance <= 4) return 15;
+        if (distance <= 6) return 10;
+        if (distance <= 8) return 5;
         return 0;
     }
 
     createFire(centerRow, centerCol, currentTime) {
-        const directions = [[0, 0], [-1, 0], [1, 0], [0, -1], [0, 1]];
-
-        for (const [dr, dc] of directions) {
-            const newRow = centerRow + dr;
-            const newCol = centerCol + dc;
-
-            if (newRow >= 0 && newRow < this.gridSize && newCol >= 0 && newCol < this.gridSize) {
-                const key = `${newRow},${newCol}`;
-                // Каждый огонёк получает свой случайный таймер от 10 до 60 секунд
-                const duration = 10000 + Math.random() * 50000;
-                this.burnedLamps[key] = currentTime + duration;
-
-                if (dr !== 0 || dc !== 0) {
-                    this.grid[newRow][newCol] = null;
-                }
+        for (const [dr, dc] of [[0, 0], [-1, 0], [1, 0], [0, -1], [0, 1]]) {
+            const nr = centerRow + dr, nc = centerCol + dc;
+            if (nr >= 0 && nr < this.gridSize && nc >= 0 && nc < this.gridSize) {
+                const key = `${nr},${nc}`;
+                this.burnedLamps[key] = currentTime + 10000 + Math.random() * 50000;
+                if (dr !== 0 || dc !== 0) this.grid[nr][nc] = null;
             }
         }
     }
 
     getWireTexture(row, col) {
         const neighbors = [false, false, false, false];
-
-        if (row > 0) {
-            const cellType = this.grid[row - 1][col];
-            if (cellType === 'amplifier' || cellType === 'inverter') {
-                if (this.canConnectToAmplifier(row - 1, col, 2)) neighbors[0] = true;
-            } else if (['blue', 'red', 'green', 'switch'].includes(cellType)) {
-                neighbors[0] = true;
-            }
-        }
-        
-        if (col < this.gridSize - 1) {
-            const cellType = this.grid[row][col + 1];
-            if (cellType === 'amplifier' || cellType === 'inverter') {
-                if (this.canConnectToAmplifier(row, col + 1, 3)) neighbors[1] = true;
-            } else if (['blue', 'red', 'green', 'switch'].includes(cellType)) {
-                neighbors[1] = true;
-            }
-        }
-        
-        if (row < this.gridSize - 1) {
-            const cellType = this.grid[row + 1][col];
-            if (cellType === 'amplifier' || cellType === 'inverter') {
-                if (this.canConnectToAmplifier(row + 1, col, 0)) neighbors[2] = true;
-            } else if (['blue', 'red', 'green', 'switch'].includes(cellType)) {
-                neighbors[2] = true;
-            }
-        }
-        
-        if (col > 0) {
-            const cellType = this.grid[row][col - 1];
-            if (cellType === 'amplifier' || cellType === 'inverter') {
-                if (this.canConnectToAmplifier(row, col - 1, 1)) neighbors[3] = true;
-            } else if (['blue', 'red', 'green', 'switch'].includes(cellType)) {
-                neighbors[3] = true;
-            }
-        }
-
+        const checkNeighbor = (r, c, dir) => {
+            const ct = this.grid[r][c];
+            if (ct === 'amplifier' || ct === 'inverter') return this.canConnectToAmplifier(r, c, dir);
+            return ['blue', 'red', 'green', 'switch'].includes(ct);
+        };
+        if (row > 0) neighbors[0] = checkNeighbor(row - 1, col, 2);
+        if (col < this.gridSize - 1) neighbors[1] = checkNeighbor(row, col + 1, 3);
+        if (row < this.gridSize - 1) neighbors[2] = checkNeighbor(row + 1, col, 0);
+        if (col > 0) neighbors[3] = checkNeighbor(row, col - 1, 1);
         const [top, right, bottom, left] = neighbors;
-        const connectionCount = neighbors.filter(Boolean).length;
-
-        if (connectionCount === 0) return 'dot';
-        if (connectionCount === 1) {
-            if (top) return 'top';
-            if (right) return 'right';
-            if (bottom) return 'bottom';
-            if (left) return 'left';
-        }
-        if (connectionCount === 2) {
+        const cnt = neighbors.filter(Boolean).length;
+        if (cnt === 0) return 'dot';
+        if (cnt === 1) return top ? 'top' : right ? 'right' : bottom ? 'bottom' : 'left';
+        if (cnt === 2) {
             if (top && bottom) return 'vertical';
             if (left && right) return 'horizontal';
             if (top && right) return 'corner_top_right';
@@ -1062,20 +851,12 @@ class SandboxGame {
             if (bottom && right) return 'corner_bottom_right';
             if (bottom && left) return 'corner_bottom_left';
         }
-        if (connectionCount === 3) {
-            if (!top) return 't_bottom';
-            if (!right) return 't_left';
-            if (!bottom) return 't_top';
-            if (!left) return 't_right';
-        }
-        if (connectionCount === 4) return 'x';
-
-        return 'dot';
+        if (cnt === 3) return !top ? 't_bottom' : !right ? 't_left' : !bottom ? 't_top' : 't_right';
+        return 'x';
     }
 
     draw() {
         this.ctx.clearRect(0, 0, this.width, this.height);
-        
         if (!this.texturesLoaded) {
             this.ctx.fillStyle = '#2c3e50';
             this.ctx.font = '20px Arial';
@@ -1083,67 +864,44 @@ class SandboxGame {
             this.ctx.fillText('Загрузка текстур...', this.width / 2, this.height / 2);
             return;
         }
-
         this.updatePower();
-
         const currentTime = Date.now();
         if (currentTime - this.lastAnimationTime > 1000 / this.animationSpeed) {
             this.currentFrame = (this.currentFrame + 1) % this.fireFrames.length;
             this.lastAnimationTime = currentTime;
         }
-
         for (const [key, expireTime] of Object.entries(this.burnedLamps)) {
-	    if (currentTime > expireTime) {
-	        const [row, col] = key.split(',').map(Number);
-	        delete this.burnedLamps[key];
-	        this.grid[row][col] = null;
-	    }
-	}
-
+            if (currentTime > expireTime) {
+                const [row, col] = key.split(',').map(Number);
+                delete this.burnedLamps[key];
+                this.grid[row][col] = null;
+            }
+        }
         for (let row = 0; row < this.gridSize; row++) {
             for (let col = 0; col < this.gridSize; col++) {
-                const x = col * this.cellSize;
-                const y = row * this.cellSize;
-                const key = `${row},${col}`;
-
+                const x = col * this.cellSize, y = row * this.cellSize, key = `${row},${col}`;
                 this.ctx.fillStyle = this.colors.white;
                 this.ctx.fillRect(x, y, this.cellSize, this.cellSize);
-
                 if (key in this.burnedLamps) {
-                    if (this.fireFrames.length > 0) {
-                        this.ctx.drawImage(this.fireFrames[this.currentFrame], x, y, this.cellSize, this.cellSize);
-                    } else {
-                        this.ctx.fillStyle = '#e74c3c';
-                        this.ctx.fillRect(x, y, this.cellSize, this.cellSize);
-                    }
+                    if (this.fireFrames.length > 0) this.ctx.drawImage(this.fireFrames[this.currentFrame], x, y, this.cellSize, this.cellSize);
+                    else { this.ctx.fillStyle = '#e74c3c'; this.ctx.fillRect(x, y, this.cellSize, this.cellSize); }
                 } else {
                     const cellType = this.grid[row][col];
                     if (cellType) {
                         const energy = this.energyGrid[row][col];
-
-                        if (cellType === 'red' && this.textures['psu']) {
-                            this.ctx.drawImage(this.textures['psu'], x, y, this.cellSize, this.cellSize);
-                        } else if (cellType === 'green') {
-                            if (energy === 20 && this.fireFrames.length > 0) {
-                                this.ctx.drawImage(this.fireFrames[this.currentFrame], x, y, this.cellSize, this.cellSize);
-                            } else if (energy >= 10 && this.textures['lampon']) {
-                                this.ctx.drawImage(this.textures['lampon'], x, y, this.cellSize, this.cellSize);
-                            } else if (energy === 5 && this.textures['lamp5v']) {
-                                this.ctx.drawImage(this.textures['lamp5v'], x, y, this.cellSize, this.cellSize);
-                            } else if (this.textures['lampoff']) {
-                                this.ctx.drawImage(this.textures['lampoff'], x, y, this.cellSize, this.cellSize);
-                            }
+                        if (cellType === 'red' && this.textures['psu']) this.ctx.drawImage(this.textures['psu'], x, y, this.cellSize, this.cellSize);
+                        else if (cellType === 'green') {
+                            if (energy === 20 && this.fireFrames.length > 0) this.ctx.drawImage(this.fireFrames[this.currentFrame], x, y, this.cellSize, this.cellSize);
+                            else if (energy >= 10 && this.textures['lampon']) this.ctx.drawImage(this.textures['lampon'], x, y, this.cellSize, this.cellSize);
+                            else if (energy === 5 && this.textures['lamp5v']) this.ctx.drawImage(this.textures['lamp5v'], x, y, this.cellSize, this.cellSize);
+                            else if (this.textures['lampoff']) this.ctx.drawImage(this.textures['lampoff'], x, y, this.cellSize, this.cellSize);
                         } else if (cellType === 'blue') {
                             const wireType = this.getWireTexture(row, col);
-                            if (this.wireTextures[wireType]) {
-                                this.ctx.drawImage(this.wireTextures[wireType], x, y, this.cellSize, this.cellSize);
-                            }
-
+                            if (this.wireTextures[wireType]) this.ctx.drawImage(this.wireTextures[wireType], x, y, this.cellSize, this.cellSize);
                             if (energy > 0) {
                                 const alpha = energy === 20 ? 0.7 : energy === 15 ? 0.6 : energy === 10 ? 0.45 : 0.35;
                                 this.ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
                                 this.ctx.fillRect(x, y, this.cellSize, this.cellSize);
-
                                 this.ctx.fillStyle = '#000000';
                                 this.ctx.font = 'bold 12px Arial';
                                 this.ctx.textAlign = 'center';
@@ -1151,29 +909,19 @@ class SandboxGame {
                                 this.ctx.fillText(energy, x + this.cellSize / 2, y + this.cellSize / 2);
                             }
                         } else if (cellType === 'switch') {
-                            if (this.switchStates[key] && this.textures['switch_on']) {
-                                this.ctx.drawImage(this.textures['switch_on'], x, y, this.cellSize, this.cellSize);
-                            } else if (this.textures['switch_off']) {
-                                this.ctx.drawImage(this.textures['switch_off'], x, y, this.cellSize, this.cellSize);
-                            }
+                            if (this.switchStates[key] && this.textures['switch_on']) this.ctx.drawImage(this.textures['switch_on'], x, y, this.cellSize, this.cellSize);
+                            else if (this.textures['switch_off']) this.ctx.drawImage(this.textures['switch_off'], x, y, this.cellSize, this.cellSize);
                         } else if (cellType === 'amplifier') {
-                            const direction = this.amplifierStates[key] || 0;
-                            const dirNames = ['right', 'down', 'left', 'up'];
-                            const textureName = `amplifier_${dirNames[direction]}`;
-                            if (this.textures[textureName]) {
-                                this.ctx.drawImage(this.textures[textureName], x, y, this.cellSize, this.cellSize);
-                            }
+                            const dir = this.amplifierStates[key] || 0;
+                            const tex = this.textures[`amplifier_${['right','down','left','up'][dir]}`];
+                            if (tex) this.ctx.drawImage(tex, x, y, this.cellSize, this.cellSize);
                         } else if (cellType === 'inverter') {
-                            const direction = this.inverterStates[key] || 0;
-                            const dirNames = ['right', 'down', 'left', 'up'];
-                            const textureName = `inverter_${dirNames[direction]}`;
-                            if (this.textures[textureName]) {
-                                this.ctx.drawImage(this.textures[textureName], x, y, this.cellSize, this.cellSize);
-                            }
+                            const dir = this.inverterStates[key] || 0;
+                            const tex = this.textures[`inverter_${['right','down','left','up'][dir]}`];
+                            if (tex) this.ctx.drawImage(tex, x, y, this.cellSize, this.cellSize);
                         }
                     }
                 }
-
                 this.ctx.strokeStyle = this.colors.gray;
                 this.ctx.lineWidth = 1;
                 this.ctx.strokeRect(x, y, this.cellSize, this.cellSize);
@@ -1204,13 +952,9 @@ window.addEventListener('DOMContentLoaded', () => {
             langBtn.innerHTML = '🇬🇧 EN';
             langBtn.title = 'Switch to English';
         }
-        
-        // Обновляем подсказки для палитры
         document.querySelectorAll('.palette-item[data-lang-en][data-lang-ru]').forEach(el => {
             el.title = el.getAttribute(`data-lang-${currentLang}`);
         });
-        
-        // Обновляем текст в info
         document.querySelectorAll('#info [data-lang-en][data-lang-ru]').forEach(el => {
             el.textContent = el.getAttribute(`data-lang-${currentLang}`);
         });
@@ -1220,6 +964,5 @@ window.addEventListener('DOMContentLoaded', () => {
         currentLang = currentLang === 'en' ? 'ru' : 'en';
         updateLanguage();
     });
-    
     updateLanguage();
 })();
